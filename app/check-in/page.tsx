@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Html5Qrcode,
-  Html5QrcodeSupportedFormats,
 } from "html5-qrcode";
 import { createClient } from "@/lib/supabase/client";
 
@@ -641,10 +640,6 @@ export default function CheckInPage() {
           },
 
           aspectRatio: 1,
-
-          formatsToSupport: [
-            Html5QrcodeSupportedFormats.QR_CODE,
-          ],
         },
 
         // ======================================================
