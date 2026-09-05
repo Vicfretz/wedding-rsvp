@@ -566,25 +566,21 @@ export default function CheckInPage() {
 
       if (ticketError) {
         console.error(
-          "Ticket number database error:",
-          {
-            message:
-              ticketError.message,
+  "Ticket number database error:",
+  {
+    message:
+      ticketError.message,
 
-            details:
-              ticketError.details,
+    details:
+      ticketError.details,
 
-            hint:
-              ticketError.hint,
+    hint:
+      ticketError.hint,
 
-            code:
-              ticketError.code,
-
-            status:
-              ticketError.status,
-          }
-        );
-
+    code:
+      ticketError.code,
+  }
+);
         throw ticketError;
       }
 
