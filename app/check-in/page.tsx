@@ -1,17 +1,16 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import {
-  Html5Qrcode,
-} from "html5-qrcode";
+import { Html5Qrcode } from "html5-qrcode";
 import { createClient } from "@/lib/supabase/client";
 
 type TicketRow = {
   id: string;
-  guest_id: string;
+  rsvp_guest_id: string;
   ticket_number: string | null;
   qr_token: string;
   checked_in: boolean;
+  checked_in_at: string | null;
 };
 
 type Guest = {
@@ -23,6 +22,8 @@ type Guest = {
 };
 
 type RSVP = {
+  id: string;
+  guest_id: string;
   attending: boolean;
   guest_count: number;
   additional_guest_names: string | null;
@@ -31,14 +32,31 @@ type RSVP = {
   message: string | null;
 };
 
+type RSVPGuest = {
+  id: string;
+  rsvp_id: string;
+  name: string;
+  guest_type: string;
+  table_number: string | null;
+};
+
+type PartyMember = RSVPGuest & {
+  ticket: TicketRow | null;
+};
+
 type TicketInfo = {
   id: string;
-  guest_id: string;
+  rsvp_guest_id: string;
   ticket_number: string | null;
   qr_token: string;
   checked_in: boolean;
+  checked_in_at: string | null;
+
+  rsvpGuest: RSVPGuest | null;
   guest: Guest | null;
   rsvp: RSVP | null;
+
+  partyMembers: PartyMember[];
 };
 
 export default function CheckInPage() {
@@ -48,7 +66,8 @@ export default function CheckInPage() {
   // STATE
   // ============================================================
 
-  const [scannerOpen, setScannerOpen] = useState(false);
+  const [scannerOpen, setScannerOpen] =
+    useState(false);
 
   const [scannerLoading, setScannerLoading] =
     useState(false);
@@ -91,37 +110,59 @@ export default function CheckInPage() {
     useRef(false);
 
   // ============================================================
-  // GET GUEST + RSVP FOR A TICKET
+  // BUILD COMPLETE TICKET INFORMATION
+  //
+  // tickets
+  //    ↓
+  // rsvp_guests
+  //    ↓
+  // rsvps
+  //    ↓
+  // guests
+  //
+  // Also loads every member of the RSVP party and their ticket.
   // ============================================================
 
   async function buildTicketInfo(
     ticketData: TicketRow
   ): Promise<TicketInfo | null> {
     // ----------------------------------------------------------
-    // FIND GUEST
+    // 1. FIND THE INDIVIDUAL RSVP GUEST
     // ----------------------------------------------------------
 
     const {
-      data: guestData,
-      error: guestError,
+      data: rsvpGuestData,
+      error: rsvpGuestError,
     } = await supabase
-      .from("guests")
+      .from("rsvp_guests")
       .select(
-        "id, first_name, last_name, email, phone"
+        `
+        id,
+        rsvp_id,
+        name,
+        guest_type,
+        table_number
+        `
       )
-      .eq("id", ticketData.guest_id)
+      .eq(
+        "id",
+        ticketData.rsvp_guest_id
+      )
       .maybeSingle();
 
-    console.log("Guest search:", {
-      guestData,
-      guestError,
-    });
+    console.log(
+      "RSVP guest search:",
+      {
+        rsvpGuestData,
+        rsvpGuestError,
+      }
+    );
 
-    if (guestError) {
-      throw guestError;
+    if (rsvpGuestError) {
+      throw rsvpGuestError;
     }
 
-    if (!guestData) {
+    if (!rsvpGuestData) {
       setError(
         "This ticket exists, but it is not connected to a guest."
       );
@@ -129,8 +170,11 @@ export default function CheckInPage() {
       return null;
     }
 
+    const rsvpGuest =
+      rsvpGuestData as RSVPGuest;
+
     // ----------------------------------------------------------
-    // FIND RSVP
+    // 2. FIND RSVP
     // ----------------------------------------------------------
 
     const {
@@ -140,6 +184,8 @@ export default function CheckInPage() {
       .from("rsvps")
       .select(
         `
+        id,
+        guest_id,
         attending,
         guest_count,
         additional_guest_names,
@@ -148,28 +194,221 @@ export default function CheckInPage() {
         message
         `
       )
-      .eq("guest_id", ticketData.guest_id)
+      .eq(
+        "id",
+        rsvpGuest.rsvp_id
+      )
       .maybeSingle();
 
-    console.log("RSVP search:", {
-      rsvpData,
-      rsvpError,
-    });
+    console.log(
+      "RSVP search:",
+      {
+        rsvpData,
+        rsvpError,
+      }
+    );
 
     if (rsvpError) {
       throw rsvpError;
     }
 
+    const rsvp =
+      rsvpData as RSVP | null;
+
+    // ----------------------------------------------------------
+    // 3. FIND PRIMARY RSVP CONTACT
+    //
+    // The individual ticket belongs to rsvp_guests.
+    // The RSVP itself points to the primary contact in guests.
+    // ----------------------------------------------------------
+
+    let guest: Guest | null = null;
+
+    if (rsvp?.guest_id) {
+      const {
+        data: guestData,
+        error: guestError,
+      } = await supabase
+        .from("guests")
+        .select(
+          `
+          id,
+          first_name,
+          last_name,
+          email,
+          phone
+          `
+        )
+        .eq(
+          "id",
+          rsvp.guest_id
+        )
+        .maybeSingle();
+
+      console.log(
+        "Primary guest search:",
+        {
+          guestData,
+          guestError,
+        }
+      );
+
+      if (guestError) {
+        throw guestError;
+      }
+
+      guest =
+        (guestData as Guest | null) ||
+        null;
+    }
+
+    // ----------------------------------------------------------
+    // 4. FIND EVERY MEMBER OF THIS RSVP PARTY
+    // ----------------------------------------------------------
+
+    let partyGuests: RSVPGuest[] = [];
+
+    if (rsvp?.id) {
+      const {
+        data: partyGuestData,
+        error: partyGuestError,
+      } = await supabase
+        .from("rsvp_guests")
+        .select(
+          `
+          id,
+          rsvp_id,
+          name,
+          guest_type,
+          table_number
+          `
+        )
+        .eq(
+          "rsvp_id",
+          rsvp.id
+        )
+        .order(
+          "created_at",
+          {
+            ascending: true,
+          }
+        );
+
+      console.log(
+        "Party guests:",
+        {
+          partyGuestData,
+          partyGuestError,
+        }
+      );
+
+      if (partyGuestError) {
+        throw partyGuestError;
+      }
+
+      partyGuests =
+        (partyGuestData || []) as RSVPGuest[];
+    }
+
+    // ----------------------------------------------------------
+    // 5. FIND TICKETS FOR EVERY MEMBER OF THE PARTY
+    // ----------------------------------------------------------
+
+    const partyMemberIds =
+      partyGuests.map(
+        (partyGuest) =>
+          partyGuest.id
+      );
+
+    let partyTickets: TicketRow[] =
+      [];
+
+    if (
+      partyMemberIds.length > 0
+    ) {
+      const {
+        data: partyTicketData,
+        error: partyTicketError,
+      } = await supabase
+        .from("tickets")
+        .select(
+          `
+          id,
+          rsvp_guest_id,
+          ticket_number,
+          qr_token,
+          checked_in,
+          checked_in_at
+          `
+        )
+        .in(
+          "rsvp_guest_id",
+          partyMemberIds
+        );
+
+      console.log(
+        "Party tickets:",
+        {
+          partyTicketData,
+          partyTicketError,
+        }
+      );
+
+      if (partyTicketError) {
+        throw partyTicketError;
+      }
+
+      partyTickets =
+        (partyTicketData || []) as TicketRow[];
+    }
+
+    // ----------------------------------------------------------
+    // 6. COMBINE PARTY PEOPLE WITH THEIR TICKETS
+    // ----------------------------------------------------------
+
+    const partyMembers: PartyMember[] =
+      partyGuests.map(
+        (partyGuest) => ({
+          ...partyGuest,
+
+          ticket:
+            partyTickets.find(
+              (partyTicket) =>
+                partyTicket.rsvp_guest_id ===
+                partyGuest.id
+            ) || null,
+        })
+      );
+
+    // ----------------------------------------------------------
+    // 7. RETURN COMPLETE INFORMATION
+    // ----------------------------------------------------------
+
     return {
       id: ticketData.id,
-      guest_id: ticketData.guest_id,
-      ticket_number: ticketData.ticket_number,
-      qr_token: ticketData.qr_token,
-      checked_in: ticketData.checked_in,
 
-      guest: guestData,
+      rsvp_guest_id:
+        ticketData.rsvp_guest_id,
 
-      rsvp: rsvpData,
+      ticket_number:
+        ticketData.ticket_number,
+
+      qr_token:
+        ticketData.qr_token,
+
+      checked_in:
+        ticketData.checked_in,
+
+      checked_in_at:
+        ticketData.checked_in_at,
+
+      rsvpGuest,
+
+      guest,
+
+      rsvp,
+
+      partyMembers,
     };
   }
 
@@ -186,10 +425,6 @@ export default function CheckInPage() {
     setTicket(null);
 
     try {
-      // --------------------------------------------------------
-      // FIND TICKET
-      // --------------------------------------------------------
-
       const {
         data: ticketData,
         error: ticketError,
@@ -198,20 +433,27 @@ export default function CheckInPage() {
         .select(
           `
           id,
-          guest_id,
+          rsvp_guest_id,
           ticket_number,
           qr_token,
-          checked_in
+          checked_in,
+          checked_in_at
           `
         )
-        .eq("qr_token", token)
+        .eq(
+          "qr_token",
+          token
+        )
         .maybeSingle();
 
-      console.log("QR ticket search:", {
-        token,
-        ticketData,
-        ticketError,
-      });
+      console.log(
+        "QR ticket search:",
+        {
+          token,
+          ticketData,
+          ticketError,
+        }
+      );
 
       if (ticketError) {
         throw ticketError;
@@ -266,16 +508,13 @@ export default function CheckInPage() {
     const code =
       ticketNumber.trim();
 
-    // Clear previous state
     setError("");
     setSuccess("");
     setTicket(null);
 
-    // ----------------------------------------------------------
-    // VALIDATE SIX DIGITS
-    // ----------------------------------------------------------
-
-    if (!/^\d{6}$/.test(code)) {
+    if (
+      !/^\d{6}$/.test(code)
+    ) {
       setError(
         "Please enter the 6-digit ticket number."
       );
@@ -291,9 +530,9 @@ export default function CheckInPage() {
         code
       );
 
-      // ========================================================
-      // 1. FIND TICKET
-      // ========================================================
+      // --------------------------------------------------------
+      // FIND TICKET
+      // --------------------------------------------------------
 
       const {
         data: ticketData,
@@ -303,16 +542,19 @@ export default function CheckInPage() {
         .select(
           `
           id,
-          guest_id,
+          rsvp_guest_id,
           ticket_number,
           qr_token,
-          checked_in
+          checked_in,
+          checked_in_at
           `
         )
-        .eq("ticket_number", code)
+        .eq(
+          "ticket_number",
+          code
+        )
         .maybeSingle();
 
-      // Very useful for debugging
       console.log(
         "Ticket number search result:",
         {
@@ -322,27 +564,29 @@ export default function CheckInPage() {
         }
       );
 
-      // --------------------------------------------------------
-      // SUPABASE ERROR
-      // --------------------------------------------------------
-
       if (ticketError) {
         console.error(
           "Ticket number database error:",
           {
-            message: ticketError.message,
-            details: ticketError.details,
-            hint: ticketError.hint,
-            code: ticketError.code,
+            message:
+              ticketError.message,
+
+            details:
+              ticketError.details,
+
+            hint:
+              ticketError.hint,
+
+            code:
+              ticketError.code,
+
+            status:
+              ticketError.status,
           }
         );
 
         throw ticketError;
       }
-
-      // --------------------------------------------------------
-      // TICKET DOES NOT EXIST
-      // --------------------------------------------------------
 
       if (!ticketData) {
         setError(
@@ -352,9 +596,9 @@ export default function CheckInPage() {
         return;
       }
 
-      // ========================================================
-      // 2. FIND GUEST + RSVP
-      // ========================================================
+      // --------------------------------------------------------
+      // BUILD COMPLETE INDIVIDUAL + PARTY INFORMATION
+      // --------------------------------------------------------
 
       const ticketInfo =
         await buildTicketInfo(
@@ -364,10 +608,6 @@ export default function CheckInPage() {
       if (!ticketInfo) {
         return;
       }
-
-      // ========================================================
-      // 3. SAVE RESULT
-      // ========================================================
 
       setTicket(ticketInfo);
 
@@ -399,7 +639,7 @@ export default function CheckInPage() {
   }
 
   // ============================================================
-  // CHECK GUEST IN
+  // CHECK INDIVIDUAL GUEST IN
   // ============================================================
 
   async function handleCheckIn() {
@@ -413,7 +653,7 @@ export default function CheckInPage() {
 
     try {
       // --------------------------------------------------------
-      // CHECK RSVP
+      // RSVP MUST BE ATTENDING
       // --------------------------------------------------------
 
       if (
@@ -431,7 +671,9 @@ export default function CheckInPage() {
       // ALREADY CHECKED IN
       // --------------------------------------------------------
 
-      if (ticket.checked_in === true) {
+      if (
+        ticket.checked_in === true
+      ) {
         setError(
           "This guest has already been checked in."
         );
@@ -439,9 +681,9 @@ export default function CheckInPage() {
         return;
       }
 
-      // ========================================================
-      // UPDATE TICKET
-      // ========================================================
+      // --------------------------------------------------------
+      // UPDATE ONLY THIS TICKET
+      // --------------------------------------------------------
 
       const {
         data: updatedTicket,
@@ -450,16 +692,25 @@ export default function CheckInPage() {
         .from("tickets")
         .update({
           checked_in: true,
+          checked_in_at:
+            new Date().toISOString(),
         })
-        .eq("id", ticket.id)
-        .eq("checked_in", false)
+        .eq(
+          "id",
+          ticket.id
+        )
+        .eq(
+          "checked_in",
+          false
+        )
         .select(
           `
           id,
-          guest_id,
+          rsvp_guest_id,
           ticket_number,
           qr_token,
-          checked_in
+          checked_in,
+          checked_in_at
           `
         )
         .maybeSingle();
@@ -472,10 +723,6 @@ export default function CheckInPage() {
         }
       );
 
-      // --------------------------------------------------------
-      // UPDATE ERROR
-      // --------------------------------------------------------
-
       if (updateError) {
         throw updateError;
       }
@@ -485,8 +732,6 @@ export default function CheckInPage() {
       // --------------------------------------------------------
 
       if (!updatedTicket) {
-        // Check whether somebody already checked it in
-
         const {
           data: currentTicket,
           error: currentError,
@@ -495,13 +740,17 @@ export default function CheckInPage() {
           .select(
             `
             id,
-            guest_id,
+            rsvp_guest_id,
             ticket_number,
             qr_token,
-            checked_in
+            checked_in,
+            checked_in_at
             `
           )
-          .eq("id", ticket.id)
+          .eq(
+            "id",
+            ticket.id
+          )
           .maybeSingle();
 
         if (currentError) {
@@ -509,11 +758,14 @@ export default function CheckInPage() {
         }
 
         if (
-          currentTicket?.checked_in === true
+          currentTicket?.checked_in ===
+          true
         ) {
           setTicket({
             ...ticket,
             checked_in: true,
+            checked_in_at:
+              currentTicket.checked_in_at,
           });
 
           setError(
@@ -530,17 +782,52 @@ export default function CheckInPage() {
         return;
       }
 
-      // ========================================================
-      // SUCCESS
-      // ========================================================
+      // --------------------------------------------------------
+      // UPDATE CURRENT SCREEN
+      // --------------------------------------------------------
+
+      const updated =
+        updatedTicket as TicketRow;
+
+      const updatedPartyMembers =
+        ticket.partyMembers.map(
+          (member) => {
+            if (
+              member.id !==
+              ticket.rsvp_guest_id
+            ) {
+              return member;
+            }
+
+            return {
+              ...member,
+              ticket: member.ticket
+                ? {
+                    ...member.ticket,
+                    checked_in:
+                      true,
+                    checked_in_at:
+                      updated.checked_in_at,
+                  }
+                : member.ticket,
+            };
+          }
+        );
 
       setTicket({
         ...ticket,
+
         checked_in: true,
+
+        checked_in_at:
+          updated.checked_in_at,
+
+        partyMembers:
+          updatedPartyMembers,
       });
 
       setSuccess(
-        "Guest checked in successfully!"
+        `${ticket.rsvpGuest?.name || "Guest"} checked in successfully!`
       );
 
     } catch (err: any) {
@@ -584,20 +871,32 @@ export default function CheckInPage() {
     setScannerOpen(true);
     setScannerLoading(true);
 
-    scanLockedRef.current = false;
-    scannerStartingRef.current = true;
+    scanLockedRef.current =
+      false;
+
+    scannerStartingRef.current =
+      true;
 
     try {
-      // Give React time to render qr-reader
-      await new Promise((resolve) =>
-        setTimeout(resolve, 200)
+      // --------------------------------------------------------
+      // GIVE REACT TIME TO RENDER SCANNER
+      // --------------------------------------------------------
+
+      await new Promise(
+        (resolve) =>
+          setTimeout(
+            resolve,
+            200
+          )
       );
 
       // --------------------------------------------------------
       // CLEAN UP OLD SCANNER
       // --------------------------------------------------------
 
-      if (scannerRef.current) {
+      if (
+        scannerRef.current
+      ) {
         try {
           if (
             scannerRunningRef.current
@@ -610,8 +909,11 @@ export default function CheckInPage() {
           scannerRef.current.clear();
         } catch {}
 
-        scannerRef.current = null;
-        scannerRunningRef.current = false;
+        scannerRef.current =
+          null;
+
+        scannerRunningRef.current =
+          false;
       }
 
       // --------------------------------------------------------
@@ -619,18 +921,23 @@ export default function CheckInPage() {
       // --------------------------------------------------------
 
       const scanner =
-        new Html5Qrcode("qr-reader");
+        new Html5Qrcode(
+          "qr-reader"
+        );
 
-      scannerRef.current = scanner;
+      scannerRef.current =
+        scanner;
 
-      // ========================================================
+      // --------------------------------------------------------
       // START CAMERA
-      // ========================================================
+      // --------------------------------------------------------
 
       await scanner.start(
         {
-          facingMode: "environment",
+          facingMode:
+            "environment",
         },
+
         {
           fps: 10,
 
@@ -642,11 +949,13 @@ export default function CheckInPage() {
           aspectRatio: 1,
         },
 
-        // ======================================================
+        // ------------------------------------------------------
         // QR DETECTED
-        // ======================================================
+        // ------------------------------------------------------
 
-        async (decodedText) => {
+        async (
+          decodedText
+        ) => {
           console.log(
             "QR code detected:",
             decodedText
@@ -658,11 +967,16 @@ export default function CheckInPage() {
             return;
           }
 
-          scanLockedRef.current = true;
+          scanLockedRef.current =
+            true;
 
-          scannerRunningRef.current = false;
+          scannerRunningRef.current =
+            false;
 
-          // Stop camera immediately
+          // ----------------------------------------------------
+          // STOP CAMERA
+          // ----------------------------------------------------
+
           try {
             await scanner.stop();
           } catch {}
@@ -671,21 +985,29 @@ export default function CheckInPage() {
             scanner.clear();
           } catch {}
 
-          scannerRef.current = null;
+          scannerRef.current =
+            null;
 
-          setScannerOpen(false);
-          setScannerLoading(false);
+          setScannerOpen(
+            false
+          );
 
-          // ====================================================
+          setScannerLoading(
+            false
+          );
+
+          // ----------------------------------------------------
           // EXTRACT TOKEN
-          // ====================================================
+          // ----------------------------------------------------
 
           let qrToken =
             decodedText.trim();
 
           try {
             const scannedUrl =
-              new URL(decodedText);
+              new URL(
+                decodedText
+              );
 
             const urlToken =
               scannedUrl.searchParams.get(
@@ -693,7 +1015,8 @@ export default function CheckInPage() {
               );
 
             if (urlToken) {
-              qrToken = urlToken;
+              qrToken =
+                urlToken;
             }
           } catch {
             // QR contains token directly
@@ -710,26 +1033,30 @@ export default function CheckInPage() {
             return;
           }
 
-          // ====================================================
+          // ----------------------------------------------------
           // VERIFY QR TICKET
-          // ====================================================
+          // ----------------------------------------------------
 
           await loadTicketByToken(
             qrToken
           );
         },
 
-        // ======================================================
+        // ------------------------------------------------------
         // SCAN ERRORS
-        // ======================================================
+        // ------------------------------------------------------
 
         (_errorMessage) => {
-          // Ignore normal scanner errors.
+          // Normal scanner errors are ignored.
         }
       );
 
-      scannerRunningRef.current = true;
-      setScannerLoading(false);
+      scannerRunningRef.current =
+        true;
+
+      setScannerLoading(
+        false
+      );
 
     } catch (err: any) {
       console.error(
@@ -744,7 +1071,9 @@ export default function CheckInPage() {
       scannerRunningRef.current =
         false;
 
-      setScannerLoading(false);
+      setScannerLoading(
+        false
+      );
 
       if (
         err?.name ===
@@ -753,6 +1082,7 @@ export default function CheckInPage() {
         setScannerError(
           "Camera permission was denied. Please allow camera access and try again."
         );
+
       } else if (
         err?.name ===
         "NotFoundError"
@@ -760,6 +1090,7 @@ export default function CheckInPage() {
         setScannerError(
           "No camera was found on this device."
         );
+
       } else {
         setScannerError(
           "We could not start the camera. Please make sure your browser has permission to use the camera."
@@ -777,7 +1108,9 @@ export default function CheckInPage() {
   // ============================================================
 
   async function stopScanner() {
-    if (!scannerRef.current) {
+    if (
+      !scannerRef.current
+    ) {
       setScannerOpen(false);
       setScannerLoading(false);
       return;
@@ -806,7 +1139,8 @@ export default function CheckInPage() {
       scannerRef.current.clear();
     } catch {}
 
-    scannerRef.current = null;
+    scannerRef.current =
+      null;
 
     setScannerOpen(false);
     setScannerLoading(false);
@@ -839,7 +1173,9 @@ export default function CheckInPage() {
 
   useEffect(() => {
     return () => {
-      if (scannerRef.current) {
+      if (
+        scannerRef.current
+      ) {
         try {
           scannerRef.current.stop();
         } catch {}
@@ -849,22 +1185,65 @@ export default function CheckInPage() {
         } catch {}
       }
 
-      scannerRef.current = null;
+      scannerRef.current =
+        null;
+
       scannerRunningRef.current =
         false;
+
       scannerStartingRef.current =
         false;
     };
   }, []);
 
   // ============================================================
-  // GUEST NAME
+  // INDIVIDUAL GUEST
   // ============================================================
 
-  const guestName =
-    ticket?.guest
-      ? `${ticket.guest.first_name} ${ticket.guest.last_name}`
-      : "";
+  const individualName =
+    ticket?.rsvpGuest?.name ||
+    "";
+
+  // ============================================================
+  // INDIVIDUAL GUEST TYPE
+  // ============================================================
+
+  const guestType =
+    ticket?.rsvpGuest
+      ?.guest_type ||
+    "";
+
+  // ============================================================
+  // INDIVIDUAL TABLE
+  // ============================================================
+
+  const individualTable =
+    ticket?.rsvpGuest
+      ?.table_number
+      ?.trim() || "";
+
+  // ============================================================
+  // PARTY STATISTICS
+  // ============================================================
+
+  const partySize =
+    ticket?.partyMembers
+      ?.length || 0;
+
+  const partyCheckedIn =
+    ticket?.partyMembers
+      ?.filter(
+        (member) =>
+          member.ticket
+            ?.checked_in
+      ).length || 0;
+
+  const partyRemaining =
+    Math.max(
+      partySize -
+        partyCheckedIn,
+      0
+    );
 
   // ============================================================
   // PAGE
@@ -1083,9 +1462,7 @@ export default function CheckInPage() {
 
               <div className="mt-10">
 
-                {/* =================================================
-                    QR BUTTON
-                ================================================= */}
+                {/* QR BUTTON */}
 
                 <button
                   type="button"
@@ -1111,9 +1488,7 @@ export default function CheckInPage() {
                 </button>
 
 
-                {/* =================================================
-                    DIVIDER
-                ================================================= */}
+                {/* DIVIDER */}
 
                 <div className="my-8 flex items-center gap-4">
 
@@ -1128,9 +1503,7 @@ export default function CheckInPage() {
                 </div>
 
 
-                {/* =================================================
-                    SIX DIGIT TICKET
-                ================================================= */}
+                {/* SIX DIGIT TICKET */}
 
                 <div className="border border-[#b9d7ea] bg-white p-7 shadow-sm sm:p-9">
 
@@ -1163,7 +1536,10 @@ export default function CheckInPage() {
                             /\D/g,
                             ""
                           )
-                          .slice(0, 6);
+                          .slice(
+                            0,
+                            6
+                          );
 
                       setTicketNumber(
                         value
@@ -1200,11 +1576,9 @@ export default function CheckInPage() {
                     }
                     className="mt-5 w-full bg-[#7a263a] px-6 py-4 text-sm font-semibold tracking-[0.2em] text-white transition hover:bg-[#0b1f3a] disabled:cursor-not-allowed disabled:opacity-40"
                   >
-
                     {loading
                       ? "VERIFYING..."
                       : "VERIFY TICKET"}
-
                   </button>
 
                 </div>
@@ -1239,9 +1613,7 @@ export default function CheckInPage() {
 
             <div className="mt-10 overflow-hidden border border-[#b9d7ea] bg-white shadow-xl">
 
-              {/* =================================================
-                  VERIFIED HEADER
-              ================================================= */}
+              {/* VERIFIED HEADER */}
 
               <div className="bg-[#0b1f3a] px-6 py-9 text-center text-white">
 
@@ -1250,8 +1622,12 @@ export default function CheckInPage() {
                 </p>
 
                 <h2 className="mt-3 text-3xl font-light">
-                  {guestName}
+                  {individualName}
                 </h2>
+
+                <p className="mt-2 text-xs uppercase tracking-[0.2em] text-white/50">
+                  {guestType}
+                </p>
 
               </div>
 
@@ -1267,7 +1643,7 @@ export default function CheckInPage() {
                   <div className="border border-[#b9d7ea] bg-[#f7faff] px-5 py-6 text-center">
 
                     <p className="text-[10px] font-semibold tracking-[0.25em] text-[#0b1f3a]/50">
-                      TICKET NUMBER
+                      INDIVIDUAL TICKET NUMBER
                     </p>
 
                     <p className="mt-2 font-mono text-3xl font-semibold tracking-[0.25em] text-[#7a263a]">
@@ -1280,7 +1656,33 @@ export default function CheckInPage() {
 
 
                 {/* =================================================
-                    GUEST
+                    TABLE NUMBER
+                ================================================= */}
+
+                {individualTable && (
+
+                  <div className="mt-7 border-2 border-[#7a263a] bg-[#7a263a]/5 px-5 py-7 text-center">
+
+                    <p className="text-[10px] font-semibold tracking-[0.3em] text-[#7a263a]">
+                      TABLE ASSIGNMENT
+                    </p>
+
+                    <p className="mt-3 text-sm text-[#0b1f3a]/60">
+                      Please proceed to
+                    </p>
+
+                    <p className="mt-1 font-serif text-5xl font-semibold text-[#7a263a]">
+                      TABLE{" "}
+                      {individualTable}
+                    </p>
+
+                  </div>
+
+                )}
+
+
+                {/* =================================================
+                    INDIVIDUAL GUEST
                 ================================================= */}
 
                 <div className="mt-7 border-b border-[#b9d7ea]/40 pb-6">
@@ -1290,24 +1692,34 @@ export default function CheckInPage() {
                   </p>
 
                   <p className="mt-2 text-2xl font-light">
-                    {guestName}
+                    {individualName}
                   </p>
 
-                  {ticket.guest?.email && (
+                  <p className="mt-1 text-xs uppercase tracking-[0.15em] text-[#7a263a]">
+                    {guestType}
+                  </p>
 
-                    <p className="mt-1 text-sm text-[#0b1f3a]/50">
-                      {ticket.guest.email}
-                    </p>
+                  {guestType
+                    .toLowerCase()
+                    .includes("primary") &&
+                    ticket.guest?.email && (
 
-                  )}
+                      <p className="mt-3 text-sm text-[#0b1f3a]/50">
+                        {ticket.guest.email}
+                      </p>
 
-                  {ticket.guest?.phone && (
+                    )}
 
-                    <p className="mt-1 text-sm text-[#0b1f3a]/50">
-                      {ticket.guest.phone}
-                    </p>
+                  {guestType
+                    .toLowerCase()
+                    .includes("primary") &&
+                    ticket.guest?.phone && (
 
-                  )}
+                      <p className="mt-1 text-sm text-[#0b1f3a]/50">
+                        {ticket.guest.phone}
+                      </p>
+
+                    )}
 
                 </div>
 
@@ -1340,13 +1752,11 @@ export default function CheckInPage() {
                   <div>
 
                     <p className="text-[10px] font-semibold tracking-[0.18em] text-[#0b1f3a]/40">
-                      GUEST COUNT
+                      PARTY SIZE
                     </p>
 
                     <p className="mt-1 text-lg">
-                      {ticket.rsvp
-                        ?.guest_count ??
-                        1}
+                      {partySize}
                     </p>
 
                   </div>
@@ -1376,24 +1786,176 @@ export default function CheckInPage() {
 
 
                 {/* =================================================
-                    ADDITIONAL GUESTS
+                    PARTY CHECK-IN PROGRESS
                 ================================================= */}
 
-                {ticket.rsvp
-                  ?.additional_guest_names && (
+                {partySize > 0 && (
 
-                  <div className="mt-7 border-t border-[#b9d7ea]/40 pt-6">
+                  <div className="mt-8 border border-[#b9d7ea] bg-[#f7faff] p-6">
+
+                    <div className="flex items-end justify-between gap-4">
+
+                      <div>
+
+                        <p className="text-[10px] font-semibold tracking-[0.2em] text-[#0b1f3a]/40">
+                          PARTY CHECK-IN
+                        </p>
+
+                        <p className="mt-2 text-3xl font-light">
+                          {partyCheckedIn}
+                          <span className="text-lg text-[#0b1f3a]/40">
+                            {" "}
+                            / {partySize}
+                          </span>
+                        </p>
+
+                      </div>
+
+                      <p className="text-right text-xs text-[#0b1f3a]/50">
+                        {partyRemaining === 0
+                          ? "Everyone has arrived"
+                          : `${partyRemaining} ${
+                              partyRemaining ===
+                              1
+                                ? "guest"
+                                : "guests"
+                            } remaining`}
+
+                      </p>
+
+                    </div>
+
+
+                    <div className="mt-5 h-2 overflow-hidden bg-[#b9d7ea]/40">
+
+                      <div
+                        className="h-full bg-[#7a263a] transition-all duration-500"
+                        style={{
+                          width: `${
+                            partySize > 0
+                              ? Math.round(
+                                  (partyCheckedIn /
+                                    partySize) *
+                                    100
+                                )
+                              : 0
+                          }%`,
+                        }}
+                      />
+
+                    </div>
+
+                  </div>
+
+                )}
+
+
+                {/* =================================================
+                    PARTY GUESTS
+                ================================================= */}
+
+                {ticket.partyMembers.length >
+                  0 && (
+
+                  <div className="mt-8 border-t border-[#b9d7ea]/40 pt-6">
 
                     <p className="text-[10px] font-semibold tracking-[0.18em] text-[#0b1f3a]/40">
-                      ADDITIONAL GUESTS
+                      PARTY GUESTS
                     </p>
 
-                    <p className="mt-2 text-sm leading-6">
-                      {
-                        ticket.rsvp
-                          .additional_guest_names
-                      }
-                    </p>
+                    <div className="mt-4 space-y-3">
+
+                      {ticket.partyMembers.map(
+                        (member) => {
+
+                          const isCurrentGuest =
+                            member.id ===
+                            ticket.rsvp_guest_id;
+
+                          const memberCheckedIn =
+                            member.ticket
+                              ?.checked_in ===
+                            true;
+
+                          return (
+
+                            <div
+                              key={
+                                member.id
+                              }
+                              className={`flex items-center justify-between gap-4 border px-4 py-4 ${
+                                isCurrentGuest
+                                  ? "border-[#7a263a]/40 bg-[#7a263a]/5"
+                                  : "border-[#b9d7ea]/40 bg-[#f7faff]"
+                              }`}
+                            >
+
+                              <div className="min-w-0">
+
+                                <div className="flex flex-wrap items-center gap-2">
+
+                                  <p className="truncate text-sm font-medium">
+                                    {
+                                      member.name
+                                    }
+                                  </p>
+
+                                  {isCurrentGuest && (
+
+                                    <span className="text-[9px] font-semibold tracking-[0.1em] text-[#7a263a]">
+                                      THIS GUEST
+                                    </span>
+
+                                  )}
+
+                                </div>
+
+                                <p className="mt-1 text-[10px] uppercase tracking-[0.15em] text-[#0b1f3a]/40">
+                                  {
+                                    member.guest_type
+                                  }
+                                </p>
+
+                              </div>
+
+
+                              <div className="shrink-0 text-right">
+
+                                {memberCheckedIn ? (
+
+                                  <p className="text-xs font-semibold text-green-700">
+                                    ✓ CHECKED IN
+                                  </p>
+
+                                ) : (
+
+                                  <p className="text-xs text-[#0b1f3a]/40">
+                                    NOT CHECKED IN
+                                  </p>
+
+                                )}
+
+                                {member.table_number && (
+
+                                  <p className="mt-1 text-[9px] uppercase tracking-[0.12em] text-[#7a263a]">
+                                    Table{" "}
+                                    {
+                                      member.table_number
+                                    }
+                                  </p>
+
+                                )}
+
+                              </div>
+
+                            </div>
+
+                          );
+
+                        }
+                      )}
+
+                    </div>
 
                   </div>
 
@@ -1433,20 +1995,31 @@ export default function CheckInPage() {
 
                   {ticket.checked_in ? (
 
-                    <div className="border border-[#7a263a]/25 bg-[#7a263a]/5 p-6 text-center">
+                    <div className="border border-green-700/25 bg-green-700/5 p-6 text-center">
 
-                      <div className="text-3xl">
+                      <div className="text-3xl text-green-700">
                         ✓
                       </div>
 
-                      <p className="mt-3 text-sm font-semibold tracking-[0.1em] text-[#7a263a]">
+                      <p className="mt-3 text-sm font-semibold tracking-[0.1em] text-green-800">
                         ALREADY CHECKED IN
                       </p>
 
                       <p className="mt-2 text-xs text-[#0b1f3a]/50">
-                        This ticket has already
-                        been used for entry.
+                        This individual ticket has
+                        already been used for entry.
                       </p>
+
+                      {ticket.checked_in_at && (
+
+                        <p className="mt-2 text-[10px] text-[#0b1f3a]/40">
+                          Checked in{" "}
+                          {new Date(
+                            ticket.checked_in_at
+                          ).toLocaleString()}
+                        </p>
+
+                      )}
 
                     </div>
 
@@ -1471,7 +2044,9 @@ export default function CheckInPage() {
 
                     <button
                       type="button"
-                      disabled={checkingIn}
+                      disabled={
+                        checkingIn
+                      }
                       onClick={() =>
                         void handleCheckIn()
                       }
@@ -1495,7 +2070,9 @@ export default function CheckInPage() {
 
                 <button
                   type="button"
-                  onClick={resetCheckIn}
+                  onClick={
+                    resetCheckIn
+                  }
                   className="mt-4 w-full border border-[#0b1f3a]/20 px-6 py-4 text-xs font-semibold tracking-[0.15em] text-[#0b1f3a] transition hover:border-[#7a263a] hover:text-[#7a263a]"
                 >
                   CHECK IN ANOTHER GUEST
