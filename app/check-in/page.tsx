@@ -44,6 +44,15 @@ type PartyMember = RSVPGuest & {
   ticket: TicketRow | null;
 };
 
+type PhysicalGuestGroup = {
+  id: string;
+  group_name: string;
+  expected_count: number;
+  arrived_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
 type TicketInfo = {
   id: string;
   rsvp_guest_id: string;
@@ -101,6 +110,86 @@ export default function CheckInPage() {
 
   const [success, setSuccess] =
     useState("");
+
+  // Physical invitation group check-in
+  const [physicalGroups, setPhysicalGroups] =
+    useState<PhysicalGuestGroup[]>([]);
+  const [groupSearch, setGroupSearch] =
+    useState("");
+  const [groupAdditionalArrivals, setGroupAdditionalArrivals] =
+    useState<Record<string, string>>({});
+  const [groupsLoading, setGroupsLoading] =
+    useState(false);
+  const [groupSaving, setGroupSaving] =
+    useState(false);
+
+  // ============================================================
+  // PHYSICAL INVITATION GROUPS
+  // ============================================================
+
+  async function loadPhysicalGroups() {
+    setGroupsLoading(true);
+    try {
+      const { data, error: groupsError } = await supabase
+        .from("physical_guest_groups")
+        .select("id, group_name, expected_count, arrived_count, created_at, updated_at")
+        .order("group_name", { ascending: true });
+
+      if (groupsError) throw groupsError;
+      setPhysicalGroups((data || []) as PhysicalGuestGroup[]);
+    } catch (err: any) {
+      console.error("Could not load physical invitation groups:", err);
+      setError(err?.message || "Could not load physical invitation groups.");
+    } finally {
+      setGroupsLoading(false);
+    }
+  }
+
+  async function recordGroupArrivals(group: PhysicalGuestGroup) {
+    const additional = Number(groupAdditionalArrivals[group.id] || "");
+    const remaining = group.expected_count - group.arrived_count;
+
+    if (!Number.isInteger(additional) || additional < 1) {
+      setError("Enter the number of additional people who have just arrived.");
+      return;
+    }
+    if (additional > remaining) {
+      setError(`Only ${remaining} more ${remaining === 1 ? "person can" : "people can"} be recorded for ${group.group_name}.`);
+      return;
+    }
+
+    setGroupSaving(true);
+    setError("");
+    setSuccess("");
+    try {
+      const { data, error: rpcError } = await supabase.rpc(
+        "add_physical_group_arrivals",
+        { p_group_id: group.id, p_additional: additional }
+      );
+      if (rpcError) throw rpcError;
+
+      const updated = Array.isArray(data) ? data[0] : data;
+      if (!updated) throw new Error("No updated group record was returned. Refresh and try again.");
+
+      setPhysicalGroups((current) => current.map((item) =>
+        item.id === group.id ? updated as PhysicalGuestGroup : item
+      ));
+      setGroupAdditionalArrivals((current) => ({ ...current, [group.id]: "" }));
+      setSuccess(`Recorded ${additional} ${additional === 1 ? "arrival" : "arrivals"} for ${group.group_name}.`);
+    } catch (err: any) {
+      console.error("Could not record group arrivals:", err);
+      setError(err?.message || "Could not record arrivals. Refresh the group list and try again.");
+      await loadPhysicalGroups();
+    } finally {
+      setGroupSaving(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadPhysicalGroups();
+    // Load the group list when the check-in page opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ============================================================
   // SCANNER REFS
@@ -1496,6 +1585,104 @@ export default function CheckInPage() {
 
           </div>
 
+
+          {/* ==================================================
+              PHYSICAL INVITATION GROUP CHECK-IN
+          ================================================== */}
+          <div className="mt-10 border border-[#b9d7ea] bg-white p-6 shadow-sm sm:p-8">
+            <div>
+              <p className="text-sm font-semibold tracking-[0.18em]">PHYSICAL INVITATION GROUPS</p>
+              <p className="mt-2 text-xs leading-5 text-[#0b1f3a]/55">
+                Select a group created by the admin and record arrivals as people arrive. No individual names, QR codes, or ticket numbers are required for these physical invitations.
+              </p>
+            </div>
+
+            <div className="mt-8 border-t border-[#b9d7ea]/50 pt-6">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-[10px] font-semibold tracking-[0.2em] text-[#0b1f3a]/50">GROUP ARRIVAL REGISTER</p>
+                <button
+                  type="button"
+                  onClick={() => void loadPhysicalGroups()}
+                  disabled={groupsLoading || groupSaving}
+                  className="text-xs font-semibold text-[#7a263a] hover:underline disabled:opacity-50"
+                >
+                  {groupsLoading ? "REFRESHING..." : "REFRESH GROUPS"}
+                </button>
+              </div>
+              <input
+                type="text"
+                value={groupSearch}
+                onChange={(event) => setGroupSearch(event.target.value)}
+                placeholder="Search group name"
+                className="mt-4 w-full border border-[#b9d7ea] bg-[#fdfdfc] px-4 py-3 text-sm outline-none focus:border-[#7a263a]"
+              />
+
+              {groupsLoading && physicalGroups.length === 0 ? (
+                <p className="mt-5 text-sm text-[#0b1f3a]/50">Loading groups...</p>
+              ) : physicalGroups.filter((group) => group.group_name.toLowerCase().includes(groupSearch.trim().toLowerCase())).length === 0 ? (
+                <p className="mt-5 text-sm text-[#0b1f3a]/50">No physical invitation groups have been created yet. Ask the admin to add them.</p>
+              ) : (
+                <div className="mt-4 space-y-4">
+                  {physicalGroups
+                    .filter((group) => group.group_name.toLowerCase().includes(groupSearch.trim().toLowerCase()))
+                    .map((group) => {
+                      const remaining = group.expected_count - group.arrived_count;
+                      const progress = Math.round((group.arrived_count / group.expected_count) * 100);
+                      return (
+                        <div key={group.id} className="border border-[#b9d7ea]/70 bg-[#f7faff] p-4 sm:p-5">
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="min-w-0">
+                              <p className="break-words text-base font-semibold">{group.group_name}</p>
+                              <p className="mt-1 text-xs text-[#0b1f3a]/50">Physical invitation · {group.expected_count} expected</p>
+                            </div>
+                            <span className={`shrink-0 text-[10px] font-semibold tracking-wide ${remaining === 0 ? "text-green-700" : "text-[#7a263a]"}`}>
+                              {remaining === 0 ? "COMPLETE" : "IN PROGRESS"}
+                            </span>
+                          </div>
+                          <div className="mt-5 flex items-end justify-between gap-3">
+                            <div>
+                              <p className="text-[10px] font-semibold tracking-[0.15em] text-[#0b1f3a]/45">ARRIVED SO FAR</p>
+                              <p className="mt-1 text-3xl font-light">{group.arrived_count}<span className="text-lg text-[#0b1f3a]/40"> / {group.expected_count}</span></p>
+                            </div>
+                            <p className="text-right text-xs text-[#0b1f3a]/50">{remaining} remaining</p>
+                          </div>
+                          <div className="mt-3 h-2 overflow-hidden bg-[#b9d7ea]/50">
+                            <div className="h-full bg-[#7a263a] transition-all" style={{ width: `${progress}%` }} />
+                          </div>
+                          {remaining > 0 && (
+                            <div className="mt-5 grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+                              <input
+                                type="number"
+                                min="1"
+                                max={remaining}
+                                step="1"
+                                inputMode="numeric"
+                                value={groupAdditionalArrivals[group.id] || ""}
+                                onChange={(event) => setGroupAdditionalArrivals((current) => ({ ...current, [group.id]: event.target.value }))}
+                                placeholder={`Additional arrivals (max ${remaining})`}
+                                aria-label={`Additional arrivals for ${group.group_name}`}
+                                className="w-full border border-[#b9d7ea] bg-white px-4 py-3 text-sm outline-none focus:border-[#7a263a]"
+                              />
+                              <button
+                                type="button"
+                                disabled={groupSaving || !groupAdditionalArrivals[group.id]}
+                                onClick={() => void recordGroupArrivals(group)}
+                                className="bg-[#7a263a] px-5 py-3 text-xs font-semibold tracking-[0.12em] text-white hover:bg-[#0b1f3a] disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                RECORD ARRIVALS
+                              </button>
+                            </div>
+                          )}
+                          <p className="mt-3 text-[10px] text-[#0b1f3a]/40">
+                            Last updated: {new Date(group.updated_at).toLocaleString()}
+                          </p>
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
+            </div>
+          </div>
 
           {/* ==================================================
               ERROR

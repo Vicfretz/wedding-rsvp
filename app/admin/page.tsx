@@ -45,6 +45,15 @@ type RSVPGuest = {
   created_at?: string;
 };
 
+type PhysicalGuestGroup = {
+  id: string;
+  group_name: string;
+  expected_count: number;
+  arrived_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
 type GuestRow = {
   rsvpGuest: RSVPGuest;
   primaryGuest?: Guest;
@@ -90,6 +99,14 @@ export default function AdminPage() {
   const [rsvps, setRsvps] = useState<RSVP[]>([]);
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [rsvpGuests, setRsvpGuests] = useState<RSVPGuest[]>([]);
+  const [physicalGroups, setPhysicalGroups] = useState<PhysicalGuestGroup[]>([]);
+  const [groupName, setGroupName] = useState("");
+  const [groupExpectedCount, setGroupExpectedCount] = useState("1");
+  const [groupSearch, setGroupSearch] = useState("");
+  const [groupLoading, setGroupLoading] = useState(false);
+  const [groupSaving, setGroupSaving] = useState(false);
+  const [groupError, setGroupError] = useState("");
+  const [groupSuccess, setGroupSuccess] = useState("");
 
   // ==========================================================
   // UI
@@ -143,6 +160,13 @@ export default function AdminPage() {
     }
 
     void loadData();
+  }, [session]);
+
+  useEffect(() => {
+    if (!session) return;
+    void loadPhysicalGroups();
+    // Load admin-managed physical invitation groups after authentication.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
   // ==========================================================
@@ -250,6 +274,67 @@ export default function AdminPage() {
   }
 
   // ==========================================================
+  // PHYSICAL INVITATION GROUPS
+  // ==========================================================
+
+  async function loadPhysicalGroups() {
+    setGroupLoading(true);
+    setGroupError("");
+    try {
+      const { data, error } = await supabase
+        .from("physical_guest_groups")
+        .select("id, group_name, expected_count, arrived_count, created_at, updated_at")
+        .order("group_name", { ascending: true });
+      if (error) throw error;
+      setPhysicalGroups((data || []) as PhysicalGuestGroup[]);
+    } catch (error: any) {
+      console.error("PHYSICAL GROUP LOAD ERROR:", error);
+      setGroupError(error?.message || "Unable to load physical invitation groups.");
+    } finally {
+      setGroupLoading(false);
+    }
+  }
+
+  async function createPhysicalGroup(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const cleanName = groupName.trim();
+    const count = Number(groupExpectedCount);
+
+    if (!cleanName) {
+      setGroupError("Enter a name for this invitation group.");
+      return;
+    }
+    if (!Number.isInteger(count) || count < 1) {
+      setGroupError("Expected guest count must be a whole number of at least 1.");
+      return;
+    }
+
+    setGroupSaving(true);
+    setGroupError("");
+    setGroupSuccess("");
+    try {
+      const { data, error } = await supabase
+        .from("physical_guest_groups")
+        .insert({ group_name: cleanName, expected_count: count })
+        .select("id, group_name, expected_count, arrived_count, created_at, updated_at")
+        .single();
+      if (error) throw error;
+      setPhysicalGroups((current) =>
+        [...current.filter((item) => item.id !== data.id), data as PhysicalGuestGroup]
+          .sort((a, b) => a.group_name.localeCompare(b.group_name))
+      );
+      setGroupName("");
+      setGroupExpectedCount("1");
+      setGroupSuccess(`Created “${cleanName}” for ${count} ${count === 1 ? "guest" : "guests"}.`);
+    } catch (error: any) {
+      console.error("PHYSICAL GROUP CREATE ERROR:", error);
+      setGroupError(error?.message || "Unable to create the group. Check the group name and try again.");
+    } finally {
+      setGroupSaving(false);
+    }
+  }
+
+  // ==========================================================
   // LOGIN
   // ==========================================================
 
@@ -287,6 +372,7 @@ export default function AdminPage() {
     setRsvps([]);
     setTickets([]);
     setRsvpGuests([]);
+    setPhysicalGroups([]);
     setSelectedGuest(null);
   }
 
@@ -466,11 +552,27 @@ export default function AdminPage() {
     (guest) => attendingRsvpIds.has(guest.rsvp_id)
   );
 
-  const totalGuests = attendingGuests.length;
+  // Keep the existing individual RSVP totals intact, then add physical
+  // invitation group counts on top of them.
+  const individualTotalGuests = attendingGuests.length;
+  const physicalGroupExpected = physicalGroups.reduce(
+    (sum, group) => sum + Number(group.expected_count || 0),
+    0
+  );
+  const physicalGroupArrived = physicalGroups.reduce(
+    (sum, group) => sum + Number(group.arrived_count || 0),
+    0
+  );
+  const physicalGroupRemaining = physicalGroups.reduce(
+    (sum, group) => sum + Math.max(0, Number(group.expected_count || 0) - Number(group.arrived_count || 0)),
+    0
+  );
+  const totalGuests = individualTotalGuests + physicalGroupExpected;
 
-  const checkedIn = tickets.filter(
+  const individualCheckedIn = tickets.filter(
     (ticket) => ticket.checked_in
   ).length;
+  const checkedIn = individualCheckedIn + physicalGroupArrived;
 
   const attendingGuestIds = new Set(
     attendingGuests.map((guest) => guest.id)
@@ -481,9 +583,10 @@ export default function AdminPage() {
       attendingGuestIds.has(ticket.rsvp_guest_id)
   );
 
-  const notCheckedIn = attendingTickets.filter(
+  const individualNotCheckedIn = attendingTickets.filter(
     (ticket) => !ticket.checked_in
   ).length;
+  const notCheckedIn = individualNotCheckedIn + physicalGroupRemaining;
 
   // ==========================================================
   // SELECTED GUEST PARTY
@@ -787,6 +890,126 @@ export default function AdminPage() {
               <br />
               FFF, Oka, Ondo City, Ondo State
             </p>
+          </div>
+        </div>
+
+        {/* ====================================================
+            PHYSICAL INVITATION GROUPS (ADMIN-MANAGED)
+        ==================================================== */}
+
+        <div className="mt-10 border border-[#B9D7EA]/60 bg-white">
+          <div className="border-b border-[#B9D7EA]/40 p-6">
+            <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+              <div>
+                <p className="text-xs tracking-[0.25em] text-[#7A263A]">PHYSICAL INVITATIONS</p>
+                <h2 className="mt-2 text-2xl font-light">Invitation Groups</h2>
+                <p className="mt-2 max-w-2xl text-sm leading-6 text-[#0B1F3A]/55">
+                  Create groups for invitations that do not have individual names, QR codes, or ticket numbers. Staff can record arrivals for each group on the check-in page.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void loadPhysicalGroups()}
+                disabled={groupLoading || groupSaving}
+                className="border border-[#0B1F3A]/20 px-4 py-2.5 text-xs tracking-[0.12em] transition hover:border-[#7A263A] hover:text-[#7A263A] disabled:opacity-50"
+              >
+                {groupLoading ? "REFRESHING..." : "REFRESH GROUPS"}
+              </button>
+            </div>
+          </div>
+
+          <div className="grid gap-8 p-6 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)]">
+            <form onSubmit={createPhysicalGroup} className="h-fit border border-[#B9D7EA]/60 bg-[#F8F9FA] p-5">
+              <h3 className="text-lg font-light">Create an invitation group</h3>
+              <p className="mt-1 text-xs leading-5 text-[#0B1F3A]/50">Example: “Adeyemi Family” with 10 expected guests.</p>
+
+              <label htmlFor="physical-group-name" className="mt-5 block text-xs font-medium tracking-[0.08em]">GROUP NAME</label>
+              <input
+                id="physical-group-name"
+                type="text"
+                value={groupName}
+                onChange={(event) => setGroupName(event.target.value)}
+                required
+                maxLength={120}
+                placeholder="e.g. Adeyemi Family"
+                className="mt-2 w-full border border-[#B9D7EA] bg-white px-4 py-3 text-sm outline-none focus:border-[#7A263A]"
+              />
+
+              <label htmlFor="physical-group-count" className="mt-5 block text-xs font-medium tracking-[0.08em]">EXPECTED GUESTS</label>
+              <input
+                id="physical-group-count"
+                type="number"
+                min="1"
+                step="1"
+                inputMode="numeric"
+                value={groupExpectedCount}
+                onChange={(event) => setGroupExpectedCount(event.target.value)}
+                required
+                className="mt-2 w-full border border-[#B9D7EA] bg-white px-4 py-3 text-sm outline-none focus:border-[#7A263A]"
+              />
+
+              <button
+                type="submit"
+                disabled={groupSaving || groupLoading}
+                className="mt-6 w-full bg-[#0B1F3A] px-5 py-3.5 text-xs font-medium tracking-[0.15em] text-white transition hover:bg-[#7A263A] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {groupSaving ? "CREATING..." : "CREATE GROUP"}
+              </button>
+              {groupError && <p role="alert" className="mt-4 break-words text-sm text-[#7A263A]">{groupError}</p>}
+              {groupSuccess && <p role="status" className="mt-4 text-sm text-green-700">{groupSuccess}</p>}
+            </form>
+
+            <div>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h3 className="text-lg font-light">Existing groups</h3>
+                  <p className="mt-1 text-xs text-[#0B1F3A]/45">{physicalGroups.length} group{physicalGroups.length === 1 ? "" : "s"} created</p>
+                </div>
+                <input
+                  type="search"
+                  value={groupSearch}
+                  onChange={(event) => setGroupSearch(event.target.value)}
+                  placeholder="Search groups..."
+                  aria-label="Search physical invitation groups"
+                  className="w-full border border-[#0B1F3A]/15 bg-[#F8F9FA] px-4 py-3 text-sm outline-none focus:border-[#7A263A] sm:max-w-xs"
+                />
+              </div>
+
+              {groupLoading && physicalGroups.length === 0 ? (
+                <p className="mt-5 text-sm text-[#0B1F3A]/50">Loading invitation groups...</p>
+              ) : physicalGroups.filter((group) => group.group_name.toLowerCase().includes(groupSearch.trim().toLowerCase())).length === 0 ? (
+                <div className="mt-5 border border-dashed border-[#B9D7EA] p-8 text-center">
+                  <p className="text-sm text-[#0B1F3A]/50">{groupSearch ? "No groups match your search." : "No physical invitation groups yet. Create the first one using the form."}</p>
+                </div>
+              ) : (
+                <div className="mt-4 space-y-3">
+                  {physicalGroups
+                    .filter((group) => group.group_name.toLowerCase().includes(groupSearch.trim().toLowerCase()))
+                    .map((group) => {
+                      const remaining = group.expected_count - group.arrived_count;
+                      const progress = Math.round((group.arrived_count / group.expected_count) * 100);
+                      return (
+                        <div key={group.id} className="border border-[#B9D7EA]/60 p-4">
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="min-w-0">
+                              <p className="break-words font-medium">{group.group_name}</p>
+                              <p className="mt-1 text-xs text-[#0B1F3A]/45">Created {new Date(group.created_at).toLocaleDateString()}</p>
+                            </div>
+                            <span className="shrink-0 text-xs font-medium text-[#7A263A]">{progress}%</span>
+                          </div>
+                          <div className="mt-4 flex items-end justify-between gap-3">
+                            <p className="text-2xl font-light">{group.arrived_count}<span className="text-base text-[#0B1F3A]/40"> / {group.expected_count}</span></p>
+                            <p className="text-right text-xs text-[#0B1F3A]/50">{remaining} remaining</p>
+                          </div>
+                          <div className="mt-3 h-2 overflow-hidden bg-[#B9D7EA]/40">
+                            <div className="h-full bg-[#7A263A]" style={{ width: `${progress}%` }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
