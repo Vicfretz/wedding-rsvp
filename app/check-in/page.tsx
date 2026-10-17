@@ -78,6 +78,15 @@ export default function CheckInPage() {
   const [ticketNumber, setTicketNumber] =
     useState("");
 
+  const [guestSearch, setGuestSearch] =
+    useState("");
+
+  const [guestSearchResults, setGuestSearchResults] =
+    useState<RSVPGuest[]>([]);
+
+  const [guestSearchLoading, setGuestSearchLoading] =
+    useState(false);
+
   const [ticket, setTicket] =
     useState<TicketInfo | null>(null);
 
@@ -410,6 +419,173 @@ export default function CheckInPage() {
 
       partyMembers,
     };
+  }
+
+  // ============================================================
+  // FIND GUEST BY NAME
+  // ============================================================
+
+  async function searchGuestsByName() {
+    const query = guestSearch.trim();
+
+    setError("");
+    setSuccess("");
+    setTicket(null);
+
+    if (query.length < 2) {
+      setGuestSearchResults([]);
+      setError("Please enter at least 2 characters of the guest's name.");
+      return;
+    }
+
+    setGuestSearchLoading(true);
+
+    try {
+      const {
+        data,
+        error: searchError,
+      } = await supabase
+        .from("rsvp_guests")
+        .select(
+          `
+          id,
+          rsvp_id,
+          name,
+          guest_type,
+          table_number
+          `
+        )
+        .ilike("name", `%${query}%`)
+        .order("name", {
+          ascending: true,
+        })
+        .limit(20);
+
+      console.log(
+        "Guest name search:",
+        {
+          query,
+          data,
+          searchError,
+        }
+      );
+
+      if (searchError) {
+        throw searchError;
+      }
+
+      setGuestSearchResults(
+        (data || []) as RSVPGuest[]
+      );
+
+      if (!data || data.length === 0) {
+        setError(
+          `No guest was found matching "${query}".`
+        );
+      }
+    } catch (err: any) {
+      console.error(
+        "Guest name search error:",
+        {
+          message: err?.message,
+          details: err?.details,
+          hint: err?.hint,
+          code: err?.code,
+          error: err,
+        }
+      );
+
+      setGuestSearchResults([]);
+
+      setError(
+        err?.message ||
+          "We could not search for this guest."
+      );
+    } finally {
+      setGuestSearchLoading(false);
+    }
+  }
+
+  async function loadGuestById(
+    rsvpGuest: RSVPGuest
+  ) {
+    setLoading(true);
+    setError("");
+    setSuccess("");
+    setTicket(null);
+
+    try {
+      const {
+        data: ticketData,
+        error: ticketError,
+      } = await supabase
+        .from("tickets")
+        .select(
+          `
+          id,
+          rsvp_guest_id,
+          ticket_number,
+          qr_token,
+          checked_in,
+          checked_in_at
+          `
+        )
+        .eq(
+          "rsvp_guest_id",
+          rsvpGuest.id
+        )
+        .maybeSingle();
+
+      console.log(
+        "Ticket found for selected guest:",
+        {
+          rsvpGuest,
+          ticketData,
+          ticketError,
+        }
+      );
+
+      if (ticketError) {
+        throw ticketError;
+      }
+
+      if (!ticketData) {
+        setError(
+          `No ticket was found for ${rsvpGuest.name}.`
+        );
+        return;
+      }
+
+      const ticketInfo =
+        await buildTicketInfo(
+          ticketData as TicketRow
+        );
+
+      if (!ticketInfo) {
+        return;
+      }
+
+      setTicket(ticketInfo);
+      setGuestSearchResults([]);
+    } catch (err: any) {
+      console.error(
+        "Selected guest lookup error:",
+        {
+          message: err?.message,
+          details: err?.details,
+          hint: err?.hint,
+          code: err?.code,
+          error: err,
+        }
+      );
+
+      setError(
+        err?.message ||
+          "We could not load this guest's invitation."
+      );
+    } finally {
+      setLoading(false);
+    }
   }
 
   // ============================================================
@@ -1151,6 +1327,8 @@ export default function CheckInPage() {
 
     setTicket(null);
     setTicketNumber("");
+    setGuestSearch("");
+    setGuestSearchResults([]);
 
     setError("");
     setSuccess("");
@@ -1310,10 +1488,10 @@ export default function CheckInPage() {
             <div className="mx-auto my-6 h-px w-16 bg-[#b9d7ea]" />
 
             <p className="mx-auto max-w-md text-sm leading-7 text-[#0b1f3a]/60">
-              Scan the guest&apos;s QR code
-              or enter their 6-digit ticket
-              number to verify their
-              invitation.
+              Scan the guest&apos;s QR code,
+              enter their 6-digit ticket
+              number, or find them by name
+              to verify their invitation.
             </p>
 
           </div>
@@ -1576,6 +1754,141 @@ export default function CheckInPage() {
                       ? "VERIFYING..."
                       : "VERIFY TICKET"}
                   </button>
+
+                </div>
+
+                {/* DIVIDER */}
+
+                <div className="my-8 flex items-center gap-4">
+
+                  <div className="h-px flex-1 bg-[#b9d7ea]" />
+
+                  <span className="text-xs font-medium tracking-[0.2em] text-[#0b1f3a]/40">
+                    OR
+                  </span>
+
+                  <div className="h-px flex-1 bg-[#b9d7ea]" />
+
+                </div>
+
+                {/* FIND GUEST BY NAME */}
+
+                <div className="border border-[#b9d7ea] bg-white p-7 shadow-sm sm:p-9">
+
+                  <div className="text-center">
+
+                    <p className="text-sm font-semibold tracking-[0.2em]">
+                      FIND GUEST BY NAME
+                    </p>
+
+                    <p className="mt-2 text-xs leading-5 text-[#0b1f3a]/50">
+                      For guests with physical invitations,
+                      search for their name to find their
+                      individual check-in record.
+                    </p>
+
+                  </div>
+
+                  <input
+                    type="text"
+                    autoComplete="off"
+                    value={guestSearch}
+                    onChange={(event) => {
+                      setGuestSearch(event.target.value);
+                      setGuestSearchResults([]);
+                      setError("");
+                      setSuccess("");
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        void searchGuestsByName();
+                      }
+                    }}
+                    placeholder="Enter guest name"
+                    className="mt-7 w-full border border-[#b9d7ea] bg-[#fdfdfc] px-4 py-4 text-center text-lg outline-none transition focus:border-[#7a263a]"
+                  />
+
+                  <button
+                    type="button"
+                    disabled={
+                      guestSearchLoading ||
+                      guestSearch.trim().length < 2
+                    }
+                    onClick={() =>
+                      void searchGuestsByName()
+                    }
+                    className="mt-5 w-full bg-[#7a263a] px-6 py-4 text-sm font-semibold tracking-[0.2em] text-white transition hover:bg-[#0b1f3a] disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {guestSearchLoading
+                      ? "SEARCHING..."
+                      : "FIND GUEST"}
+                  </button>
+
+                  {guestSearchResults.length > 0 && (
+
+                    <div className="mt-6 border-t border-[#b9d7ea]/50 pt-5">
+
+                      <p className="text-[10px] font-semibold tracking-[0.2em] text-[#0b1f3a]/40">
+                        SELECT GUEST
+                      </p>
+
+                      <div className="mt-3 space-y-2">
+
+                        {guestSearchResults.map(
+                          (result) => (
+                            <button
+                              key={result.id}
+                              type="button"
+                              disabled={loading}
+                              onClick={() =>
+                                void loadGuestById(result)
+                              }
+                              className="w-full border border-[#b9d7ea]/60 bg-[#f7faff] px-4 py-4 text-left transition hover:border-[#7a263a]/50 hover:bg-[#7a263a]/5 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+
+                              <div className="flex items-center justify-between gap-4">
+
+                                <div className="min-w-0">
+
+                                  <p className="truncate text-sm font-medium text-[#0b1f3a]">
+                                    {result.name}
+                                  </p>
+
+                                  <p className="mt-1 text-[10px] uppercase tracking-[0.15em] text-[#0b1f3a]/40">
+                                    {result.guest_type}
+                                  </p>
+
+                                </div>
+
+                                <div className="shrink-0 text-right">
+
+                                  {result.table_number ? (
+                                    <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#7a263a]">
+                                      Table {result.table_number}
+                                    </p>
+                                  ) : (
+                                    <p className="text-[10px] text-[#0b1f3a]/35">
+                                      Table not assigned
+                                    </p>
+                                  )}
+
+                                  <p className="mt-1 text-[9px] uppercase tracking-[0.1em] text-[#0b1f3a]/35">
+                                    Select
+                                  </p>
+
+                                </div>
+
+                              </div>
+
+                            </button>
+                          )
+                        )}
+
+                      </div>
+
+                    </div>
+
+                  )}
 
                 </div>
 
